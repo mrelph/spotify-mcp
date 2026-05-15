@@ -8,7 +8,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "sanity-mcp-server": "./build/index.js"
+    "spotify-mcp-server": "./build/index.js"
   },
   "files": [
     "build"

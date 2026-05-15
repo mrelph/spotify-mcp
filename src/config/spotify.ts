@@ -86,26 +86,15 @@ export async function startOAuthFlow(): Promise<string> {
   
   // Generate state for security
   const state = generateRandomString(16)
-  
-  // Define required scopes
+
+  // Scopes limited to what registered tools actually use
   const scopes = [
     'user-read-private',
-    'user-read-email', 
+    'user-top-read',
     'playlist-read-private',
     'playlist-read-collaborative',
     'playlist-modify-private',
     'playlist-modify-public',
-    'user-library-read',
-    'user-library-modify',
-    'user-read-playback-state',
-    'user-modify-playback-state',
-    'user-read-currently-playing',
-    'user-read-recently-played',
-    'user-top-read',
-    'user-follow-read',
-    'user-follow-modify',
-    'streaming',
-    'app-remote-control'
   ]
 
   // Create authorization URL with state
@@ -120,20 +109,22 @@ export async function startOAuthFlow(): Promise<string> {
 
   const authorizationUrl = `https://accounts.spotify.com/authorize?${authParams.toString()}`
 
-  // Start callback server if not already running
-  if (!oauthServer) {
-    await startCallbackServer(state)
+  // Tear down any prior callback server so the new state is the one being validated
+  if (oauthServer) {
+    await new Promise<void>((resolve) => oauthServer!.close(() => resolve()))
+    oauthServer = null
   }
+  await startCallbackServer(state)
 
   // Automatically open browser
   try {
     await open(authorizationUrl)
-    console.log('Opening browser for authorization...')
+    console.error('Opening browser for authorization...')
   } catch {
-    console.log(
+    console.error(
       'Failed to open browser automatically. Please visit this URL to authorize:',
     )
-    console.log(authorizationUrl)
+    console.error(authorizationUrl)
   }
 
   return authorizationUrl
@@ -218,7 +209,7 @@ function startCallbackServer(expectedState: string): Promise<void> {
         res.end(
           '<html><body><h1>Authentication Successful!</h1><p>You can now close this window and return to the application.</p></body></html>',
         )
-        console.log(
+        console.error(
           'Authentication successful! Access token has been saved.',
         )
 
@@ -248,7 +239,7 @@ function startCallbackServer(expectedState: string): Promise<void> {
     })
 
     oauthServer = app.listen(port, '127.0.0.1', () => {
-      console.log(
+      console.error(
         `Listening for Spotify authentication callback on port ${port}`,
       )
       resolve()
@@ -284,12 +275,14 @@ async function exchangeCodeForToken(code: string): Promise<{
  */
 export function hasValidTokens(): boolean {
   if (!env.success) return false
-  
+
   const hasEnvTokens = !!(env.data.SPOTIFY_API_TOKEN && env.data.SPOTIFY_REFRESH_TOKEN)
   const hasStorageTokens = !!(tokenStorage.accessToken && tokenStorage.refreshToken)
   const isNotExpired = !tokenStorage.expiresAt || tokenStorage.expiresAt > Date.now()
-  
-  return hasEnvTokens || (hasStorageTokens && isNotExpired)
+
+  // Env-provided tokens have no embedded expiry; the caller is expected to
+  // recover from a stale access token via refreshSpotifyToken() on first 401.
+  return (hasEnvTokens && isNotExpired) || (hasStorageTokens && isNotExpired)
 }
 
 /**
@@ -319,7 +312,7 @@ export async function refreshSpotifyToken(): Promise<void> {
       client.setRefreshToken(data.body.refresh_token)
     }
     
-    console.log('Successfully refreshed Spotify access token')
+    console.error('Successfully refreshed Spotify access token')
   } catch (error) {
     console.error('Failed to refresh Spotify access token:', error)
     throw error

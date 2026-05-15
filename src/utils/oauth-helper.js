@@ -1,234 +1,199 @@
 #!/usr/bin/env node
 
-import express from 'express';
-import SpotifyWebApi from 'spotify-web-api-node';
-import dotenv from 'dotenv';
-import open from 'open';
+import {randomBytes} from 'node:crypto'
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs'
+import {resolve} from 'node:path'
 
-// Load environment variables
-dotenv.config();
+import dotenv from 'dotenv'
+import express from 'express'
+import open from 'open'
+import SpotifyWebApi from 'spotify-web-api-node'
+
+dotenv.config()
 
 const {
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
-  SPOTIFY_REDIRECT_URI = 'http://127.0.0.1:8000/callback'
-} = process.env;
+  SPOTIFY_REDIRECT_URI = 'http://127.0.0.1:8000/callback',
+} = process.env
 
 if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) {
-  console.error('❌ Missing required environment variables:');
-  console.error('   SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required');
-  console.error('   Please set them in your .env file');
-  process.exit(1);
+  console.error('Missing required environment variables:')
+  console.error('   SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required')
+  console.error('   Please set them in your .env file')
+  process.exit(1)
 }
 
-// Validate redirect URI
-const redirectUri = new URL(SPOTIFY_REDIRECT_URI);
-if (
-  redirectUri.hostname !== 'localhost' &&
-  redirectUri.hostname !== '127.0.0.1'
-) {
-  console.error('❌ Error: Redirect URI must use localhost for automatic token exchange');
-  console.error('   Please update your SPOTIFY_REDIRECT_URI with a localhost redirect URI');
-  console.error('   Example: http://127.0.0.1:8000/callback');
-  process.exit(1);
+const redirectUri = new URL(SPOTIFY_REDIRECT_URI)
+if (redirectUri.hostname !== 'localhost' && redirectUri.hostname !== '127.0.0.1') {
+  console.error('Error: Redirect URI must use localhost for automatic token exchange')
+  console.error('   Example: http://127.0.0.1:8000/callback')
+  process.exit(1)
 }
 
-const port = redirectUri.port || '8000';
-const callbackPath = redirectUri.pathname || '/callback';
+const port = redirectUri.port || '8000'
+const callbackPath = redirectUri.pathname || '/callback'
 
-// Generate state for security
-function generateRandomString(length) {
-  let result = '';
-  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  const charactersLength = characters.length;
-  
-  for (let i = 0; i < length; i++) {
-    result += characters.charAt(Math.floor(Math.random() * charactersLength));
-  }
-  
-  return result;
-}
+const state = randomBytes(16).toString('hex')
 
-const state = generateRandomString(16);
-
-// Create Spotify client
 const spotifyApi = new SpotifyWebApi({
   clientId: SPOTIFY_CLIENT_ID,
   clientSecret: SPOTIFY_CLIENT_SECRET,
   redirectUri: SPOTIFY_REDIRECT_URI,
-});
+})
 
-// Define required scopes
 const scopes = [
   'user-read-private',
-  'user-read-email', 
+  'user-top-read',
   'playlist-read-private',
   'playlist-read-collaborative',
   'playlist-modify-private',
   'playlist-modify-public',
-  'user-library-read',
-  'user-library-modify',
-  'user-read-playback-state',
-  'user-modify-playback-state',
-  'user-read-currently-playing',
-  'user-read-recently-played',
-  'user-top-read',
-  'user-follow-read',
-  'user-follow-modify',
-  'streaming',
-  'app-remote-control'
-];
+]
 
-// Create authorization URL with state
 const authParams = new URLSearchParams({
   client_id: SPOTIFY_CLIENT_ID,
   response_type: 'code',
   redirect_uri: SPOTIFY_REDIRECT_URI,
   scope: scopes.join(' '),
-  state: state,
+  state,
   show_dialog: 'true',
-});
+})
 
-const authorizationUrl = `https://accounts.spotify.com/authorize?${authParams.toString()}`;
+const authorizationUrl = `https://accounts.spotify.com/authorize?${authParams.toString()}`
 
-// Create Express app
-const app = express();
+/**
+ * Persists or updates SPOTIFY_API_TOKEN / SPOTIFY_REFRESH_TOKEN in .env without
+ * echoing the values to the terminal or the browser.
+ */
+function writeTokensToEnv(accessToken, refreshToken) {
+  const envPath = resolve(process.cwd(), '.env')
+  const existing = existsSync(envPath) ? readFileSync(envPath, 'utf8') : ''
+  const lines = existing.split(/\r?\n/)
+  const updates = {
+    SPOTIFY_API_TOKEN: accessToken,
+    SPOTIFY_REFRESH_TOKEN: refreshToken,
+  }
+
+  const seen = new Set()
+  const rewritten = lines.map((line) => {
+    const match = line.match(/^([A-Z0-9_]+)=/)
+    if (match && updates[match[1]] !== undefined) {
+      seen.add(match[1])
+      return `${match[1]}=${updates[match[1]]}`
+    }
+    return line
+  })
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (!seen.has(key)) {
+      rewritten.push(`${key}=${value}`)
+    }
+  }
+
+  const out = rewritten.join('\n').replace(/\n+$/, '') + '\n'
+  if (existing) {
+    writeFileSync(envPath, out, {mode: 0o600})
+  } else {
+    appendFileSync(envPath, out, {mode: 0o600})
+  }
+}
+
+const app = express()
 
 app.get(callbackPath, async (req, res) => {
-  const code = req.query.code;
-  const returnedState = req.query.state;
-  const error = req.query.error;
+  const code = typeof req.query.code === 'string' ? req.query.code : ''
+  const returnedState = typeof req.query.state === 'string' ? req.query.state : ''
+  const error = typeof req.query.error === 'string' ? req.query.error : ''
 
-  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'})
 
   if (error) {
-    console.error(`❌ Authorization error: ${error}`);
+    console.error('Authorization error')
     res.end(
-      '<html><body><h1>❌ Authentication Failed</h1><p>Please close this window and try again.</p></body></html>'
-    );
-    server.close();
-    process.exit(1);
+      '<html><body><h1>Authentication Failed</h1><p>Please close this window and try again.</p></body></html>',
+    )
+    server.close()
+    process.exit(1)
+    return
   }
 
   if (returnedState !== state) {
-    console.error('❌ State mismatch error');
+    console.error('State mismatch error')
     res.end(
-      '<html><body><h1>❌ Authentication Failed</h1><p>State verification failed. Please close this window and try again.</p></body></html>'
-    );
-    server.close();
-    process.exit(1);
+      '<html><body><h1>Authentication Failed</h1><p>State verification failed. Please close this window and try again.</p></body></html>',
+    )
+    server.close()
+    process.exit(1)
+    return
   }
 
   if (!code) {
-    console.error('❌ No authorization code received');
+    console.error('No authorization code received')
     res.end(
-      '<html><body><h1>❌ Authentication Failed</h1><p>No authorization code received. Please close this window and try again.</p></body></html>'
-    );
-    server.close();
-    process.exit(1);
+      '<html><body><h1>Authentication Failed</h1><p>No authorization code received. Please close this window and try again.</p></body></html>',
+    )
+    server.close()
+    process.exit(1)
+    return
   }
 
   try {
-    console.log('🔄 Exchanging authorization code for tokens...');
-    const data = await spotifyApi.authorizationCodeGrant(code);
-    
-    const { access_token, refresh_token, expires_in } = data.body;
+    console.error('Exchanging authorization code for tokens...')
+    const data = await spotifyApi.authorizationCodeGrant(code)
+    const {access_token, refresh_token, expires_in} = data.body
 
-    console.log('\n✅ Successfully obtained tokens!');
-    console.log('📋 Add these to your .env file:\n');
-    console.log(`SPOTIFY_API_TOKEN=${access_token}`);
-    console.log(`SPOTIFY_REFRESH_TOKEN=${refresh_token}`);
-    console.log(`\n⏰ Token expires in: ${expires_in} seconds`);
+    writeTokensToEnv(access_token, refresh_token)
+    console.error('Tokens written to .env (chmod 600). Expires in:', expires_in, 'seconds')
 
-    res.end(`
-      <html>
-        <body>
-          <h1>✅ Authentication Successful!</h1>
-          <p>Your Spotify tokens have been generated successfully!</p>
-          <h3>📋 Add these to your .env file:</h3>
-          <textarea readonly style="width: 100%; height: 100px; font-family: monospace; padding: 10px; margin: 10px 0;">SPOTIFY_API_TOKEN=${access_token}
-SPOTIFY_REFRESH_TOKEN=${refresh_token}</textarea>
-          <p><strong>⏰ Token expires in:</strong> ${expires_in} seconds</p>
-          <p>✨ You can now close this window and use the Spotify MCP server!</p>
-          <script>
-            // Auto-close after 5 seconds
-            setTimeout(() => {
-              window.close();
-            }, 5000);
-          </script>
-        </body>
-      </html>
-    `);
+    res.end(
+      '<html><body><h1>Authentication Successful</h1>' +
+        '<p>Tokens have been saved to your local .env file. You can close this window.</p>' +
+        '<script>setTimeout(() => window.close(), 3000);</script>' +
+        '</body></html>',
+    )
 
-    // Auto-shutdown server after successful auth
     setTimeout(() => {
-      console.log('\n🔄 Shutting down OAuth server...');
-      console.log('✨ Authorization complete! You can now use the Spotify MCP server.');
-      server.close();
-      process.exit(0);
-    }, 3000);
-
-  } catch (error) {
-    console.error('❌ Error exchanging code for tokens:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    res.end(`
-      <html>
-        <body>
-          <h1>❌ Authentication Failed</h1>
-          <p>Failed to exchange authorization code for tokens:</p>
-          <pre>${errorMessage}</pre>
-          <p><a href="javascript:window.close()">Close Window</a></p>
-        </body>
-      </html>
-    `);
-    server.close();
-    process.exit(1);
+      console.error('Shutting down OAuth server...')
+      server.close()
+      process.exit(0)
+    }, 1500)
+  } catch (err) {
+    console.error('Error exchanging code for tokens:', err instanceof Error ? err.message : err)
+    res.end(
+      '<html><body><h1>Authentication Failed</h1><p>Failed to exchange authorization code for tokens. See terminal for details.</p></body></html>',
+    )
+    server.close()
+    process.exit(1)
   }
-});
+})
 
-// Handle 404 for other paths
 app.use((_req, res) => {
-  res.writeHead(404);
-  res.end();
-});
+  res.writeHead(404)
+  res.end()
+})
 
-// Start server
 const server = app.listen(port, '127.0.0.1', () => {
-  console.log('🚀 Spotify OAuth Helper Started');
-  console.log('================================');
-  console.log(`📡 Callback server running at: http://127.0.0.1:${port}`);
-  console.log(`🔗 Authorization URL:`);
-  console.log(`   ${authorizationUrl}`);
-  console.log('');
-  console.log('📋 Instructions:');
-  console.log('1. The authorization URL will open automatically in your browser');
-  console.log('2. Log in to Spotify and authorize the application');
-  console.log('3. You\'ll be redirected back automatically');
-  console.log('4. Copy the tokens to your .env file');
-  console.log('5. Use the Spotify MCP server!');
-  console.log('');
-  console.log('⏳ Opening browser and waiting for authorization...');
-  console.log('   (Press Ctrl+C to cancel)');
+  console.error('Spotify OAuth Helper started')
+  console.error(`Callback server: http://127.0.0.1:${port}${callbackPath}`)
+  console.error('Authorization URL (opening in browser):')
+  console.error(`  ${authorizationUrl}`)
+  console.error('Press Ctrl+C to cancel.')
 
-  // Automatically open browser
   open(authorizationUrl).catch(() => {
-    console.log('\n💡 Failed to open browser automatically. Please visit the URL above.');
-  });
-});
+    console.error('Failed to open browser automatically. Please visit the URL above.')
+  })
+})
 
-server.on('error', (error) => {
-  console.error('❌ Server error:', error);
-  if (error.code === 'EADDRINUSE') {
-    console.error(`💡 Port ${port} is already in use. Try stopping any existing servers.`);
+server.on('error', (err) => {
+  console.error('Server error:', err.message)
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${port} is already in use. Stop the conflicting process and retry.`)
   }
-  process.exit(1);
-});
+  process.exit(1)
+})
 
-// Handle graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\n🔄 Shutting down OAuth server...');
-  server.close(() => {
-    console.log('👋 Server stopped');
-    process.exit(0);
-  });
-}); 
+  console.error('Shutting down OAuth server...')
+  server.close(() => process.exit(0))
+})
